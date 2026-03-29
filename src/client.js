@@ -318,10 +318,26 @@ async function handleIncomingData(payload, hostKP, serializedKP, config, api, re
     }
 
     // If it's a plain chat message (unencrypted), handle it directly
-    if (plain.type === 'chat' && plain.message) {
-      log(`[unencrypted] Received: ${plain.message}`);
-      // Route to the owner's main session so context/memory is shared
-      const msgWithSession = { ...plain, sessionKey: plain.sessionKey || 'main' };
+    // Also handle messages that only carry attachments (no text body)
+    if (plain.type === 'chat' && (plain.message || plain.attachments)) {
+      const hasAttachments = Array.isArray(plain.attachments) && plain.attachments.length > 0;
+      const displayText = plain.message || (hasAttachments ? '[attachment]' : '');
+      log(`[unencrypted] Received: ${displayText}`);
+
+      // Build the message payload for the OpenClaw API.
+      // The gateway chat.send RPC accepts a plain text message string only.
+      // If the user sent image attachments without text, acknowledge them but note
+      // that image vision support requires the encrypted E2E flow or a future API update.
+      let messageText = plain.message || '';
+      if (hasAttachments && !messageText) {
+        messageText = '[User sent an image]';
+      } else if (hasAttachments) {
+        // Text + image: send the text as-is; image data is not forwarded (gateway
+        // does not accept base64 media via chat.send in this integration yet).
+        log(`[unencrypted] Note: ${plain.attachments.length} attachment(s) present but not forwarded to gateway`);
+      }
+
+      const msgWithSession = { ...plain, message: messageText, sessionKey: plain.sessionKey || 'main' };
       const response = await api.sendMessage(msgWithSession);
       log(`[unencrypted] Response: ${response.message}`);
       relay.sendData(JSON.stringify({ type: 'chat', message: response.message }));
