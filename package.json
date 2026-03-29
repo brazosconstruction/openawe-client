@@ -1,0 +1,17 @@
+{
+  "name": "openawe-openclaw-client",
+  "version": "0.1.0",
+  "description": "OpenAwe relay client for OpenClaw — bridges the mobile app to OpenClaw via E2E encrypted relay",
+  "main": "src/client.js",
+  "scripts": {
+    "start": "node src/client.js",
+    "pair": "node src/client.js --pair",
+    "status": "node src/client.js --status"
+  },
+  "dependencies": {
+    "@openawe/crypto": "file:../openawe-crypto",
+    "libsodium-wrappers": "^0.8.2",
+    "ws": "^8.16.0"
+  },
+  "license": "MIT"
+}
