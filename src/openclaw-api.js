@@ -817,12 +817,21 @@ class OpenClawAPI {
         });
       });
 
-      const ack = await this._request('chat.send', {
+      const chatPayload = {
         sessionKey,
         message: messageText,
         deliver: false,
         idempotencyKey,
-      });
+      };
+
+      // If message has a media path, include it in the message text
+      if (msg.mediaPath) {
+        chatPayload.message = messageText
+          ? `${messageText}\n\n[Image: ${msg.mediaPath}]`
+          : `[Image: ${msg.mediaPath}]`;
+      }
+
+      const ack = await this._request('chat.send', chatPayload);
 
       const listener = this.chatListeners.get(idempotencyKey);
       if (listener && ack?.runId) {

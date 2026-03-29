@@ -263,7 +263,14 @@ async function handleRun(config, serializedKP) {
     appOnline = !!status.online;
     if (status.online) {
       log('App connected! Ready to receive messages.');
-      relay.sendData(JSON.stringify({ type: 'status', connected: true, echoMode: !api.apiAvailable }));
+      // Send status back to app so it can auto-reconnect without re-pairing
+      relay.sendData(JSON.stringify({
+        type: 'status',
+        online: true,
+        connected: true,
+        echoMode: !api.apiAvailable,
+        relayId: config.relayId,
+      }));
     } else {
       log('App disconnected (backgrounded or offline).');
     }
@@ -303,6 +310,7 @@ async function handleIncomingData(payload, hostKP, serializedKP, config, api, re
   let decrypted;
 
   // First, try to parse as plain JSON (for pairing messages and unencrypted bootstrap)
+  log(`[debug] payload length: ${payload.length}, first 100: ${String(payload).slice(0, 100)}`);
   try {
     const plain = JSON.parse(payload);
     if (plain.type === 'pair_request' || plain.type === 'pairing_request') {
@@ -329,15 +337,39 @@ async function handleIncomingData(payload, hostKP, serializedKP, config, api, re
       // If the user sent image attachments without text, acknowledge them but note
       // that image vision support requires the encrypted E2E flow or a future API update.
       let messageText = plain.message || '';
-      if (hasAttachments && !messageText) {
-        messageText = '[User sent an image]';
-      } else if (hasAttachments) {
-        // Text + image: send the text as-is; image data is not forwarded (gateway
-        // does not accept base64 media via chat.send in this integration yet).
-        log(`[unencrypted] Note: ${plain.attachments.length} attachment(s) present but not forwarded to gateway`);
+      let savedImagePath = null;
+      if (hasAttachments) {
+        // Save first attachment to a temp file so OpenClaw can read it
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const firstImg = plain.attachments.find(a => a.data);
+        if (!firstImg && !messageText) messageText = '[User sent an attachment]';
+        if (firstImg) {
+          try {
+            const ext = firstImg.mimeType === 'image/png' ? 'png' : 'jpg';
+            savedImagePath = path.join(os.tmpdir(), `openawe-img-${Date.now()}.${ext}`);
+            const imgBuffer = Buffer.from(firstImg.data, 'base64');
+            fs.writeFileSync(savedImagePath, imgBuffer);
+            log(`[image] Saved to ${savedImagePath} (${imgBuffer.length} bytes)`);
+            if (!messageText) {
+              messageText = `[Image attached: ${savedImagePath}]`;
+            } else {
+              messageText = `${messageText} [Image: ${savedImagePath}]`;
+            }
+          } catch (err) {
+            log(`[image] Failed to save: ${err.message}`);
+            if (!messageText) messageText = '[User sent an attachment]';
+          }
+        }
       }
 
-      const msgWithSession = { ...plain, message: messageText, sessionKey: plain.sessionKey || 'main' };
+      const msgWithSession = { 
+        ...plain, 
+        message: messageText, 
+        sessionKey: plain.sessionKey || 'main',
+        ...(savedImagePath ? { mediaPath: savedImagePath } : {})
+      };
       const response = await api.sendMessage(msgWithSession);
       log(`[unencrypted] Response: ${response.message}`);
       relay.sendData(JSON.stringify({ type: 'chat', message: response.message }));
