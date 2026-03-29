@@ -256,16 +256,21 @@ async function handleRun(config, serializedKP) {
     log('Registered with relay as host');
   });
 
+  // Track whether the app is currently online (connected to relay)
+  let appOnline = false;
+
   relay.on('partnerStatus', (status) => {
+    appOnline = !!status.online;
     if (status.online) {
       log('App connected! Ready to receive messages.');
-      // Send a status message (unencrypted, for bootstrapping)
       relay.sendData(JSON.stringify({ type: 'status', connected: true, echoMode: !api.apiAvailable }));
+    } else {
+      log('App disconnected (backgrounded or offline).');
     }
   });
 
   relay.on('data', async (payload) => {
-    await handleIncomingData(payload, hostKP, serializedKP, config, api, relay);
+    await handleIncomingData(payload, hostKP, serializedKP, config, api, relay, () => appOnline);
   });
 
   relay.on('disconnected', () => {
@@ -294,7 +299,7 @@ async function handleRun(config, serializedKP) {
 
 // --- Message Handling ---
 
-async function handleIncomingData(payload, hostKP, serializedKP, config, api, relay) {
+async function handleIncomingData(payload, hostKP, serializedKP, config, api, relay, getAppOnline) {
   let decrypted;
 
   // First, try to parse as plain JSON (for pairing messages and unencrypted bootstrap)
@@ -304,6 +309,14 @@ async function handleIncomingData(payload, hostKP, serializedKP, config, api, re
       await handlePairRequest(plain, hostKP, serializedKP, config, relay);
       return;
     }
+    // Push token registration from the mobile app
+    if (plain.type === 'push_token' && plain.token) {
+      config.pushToken = plain.token;
+      saveConfig(config);
+      log(`Push token registered: ${plain.token.slice(0, 30)}...`);
+      return;
+    }
+
     // If it's a plain chat message (unencrypted), handle it directly
     if (plain.type === 'chat' && plain.message) {
       log(`[unencrypted] Received: ${plain.message}`);
@@ -359,8 +372,26 @@ async function handleIncomingData(payload, hostKP, serializedKP, config, api, re
     const response = await api.sendMessage(msg);
     log(`Response: ${response.message.slice(0, 80)}`);
 
-    // Encrypt the response and send back
-    // Find the device we decrypted from (last successful one)
+    // Check if the app is currently online
+    const isOnline = typeof getAppOnline === 'function' ? getAppOnline() : true;
+
+    if (!isOnline && config.pushToken) {
+      // App is backgrounded — fire a push notification to wake it
+      log(`App is offline — sending push notification to ${config.pushToken.slice(0, 30)}...`);
+      try {
+        const preview = response.message.slice(0, 100) + (response.message.length > 100 ? '…' : '');
+        await sendExpoPushNotification(config.pushToken, {
+          title: 'Nora',
+          body: preview,
+          data: { type: 'message' },
+        });
+        log('Push notification sent successfully');
+      } catch (err) {
+        log(`Push notification failed: ${err.message}`);
+      }
+    }
+
+    // Encrypt the response and send back (relay will buffer if app reconnects)
     for (const device of (config.pairedDevices || [])) {
       try {
         const { from_base64: fb64 } = require('libsodium-wrappers');
@@ -434,6 +465,54 @@ async function handlePairRequest(msg, hostKP, serializedKP, config, relay) {
     relayId: config.relayId,
     deviceName: device.name,
   }));
+}
+
+// --- Push Notifications ---
+
+/**
+ * Send an Expo push notification via the Expo Push API.
+ * Docs: https://docs.expo.dev/push-notifications/sending-notifications/
+ */
+function sendExpoPushNotification(token, { title = 'Nora', body = 'New message', data = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      to: token,
+      title,
+      body,
+      data,
+      sound: 'default',
+      priority: 'high',
+    });
+
+    const req = https.request(
+      {
+        hostname: 'exp.host',
+        path: '/--/api/v2/push/send',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Accept-Encoding': 'gzip, deflate',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(JSON.parse(data));
+          } else {
+            reject(new Error(`Expo push API returned ${res.statusCode}: ${data}`));
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 // --- Utilities ---
